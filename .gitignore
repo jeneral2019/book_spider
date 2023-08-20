@@ -1,0 +1,7 @@
+venv
+.idea
+.pytest_cache
+*/pytest_cache
+__pycache__
+*.log
+*.txt
