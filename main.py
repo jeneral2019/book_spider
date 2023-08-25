@@ -8,6 +8,9 @@ import time
 import requests
 from bs4 import BeautifulSoup
 import re
+import os
+import json
+from urllib.parse import urlparse
 
 # 加载 .env 文件
 load_dotenv()
@@ -27,6 +30,7 @@ load_dotenv()
 5. is_next      判断该章是否未爬完
 
 rule = {
+    "name": ".w100>h1",
     "toc": ".container.border3-2.mt8.mb20>a",
     "content": "#article",
     "is_next": "#next_url"
@@ -53,11 +57,15 @@ def req(url):
     return r
 
 
-def spider_books(base_url, toc_url, filename, rules):
+def spider_books(base_url, toc_url, rule):
+    # 规则检查
+    check_rule(rule)
+
     r = req(toc_url)
     r.encoding = r.apparent_encoding
     soup = BeautifulSoup(r.text, features="html.parser")
-    titles = soup.select(rules["toc"])
+    filename = soup.select(rule["name"])[0].text + '.txt'
+    titles = soup.select(rule["toc"])
     for title in titles:
         r_title = prefix_title(title.text)
         d = req(base_url + title.get('href'))
@@ -65,14 +73,14 @@ def spider_books(base_url, toc_url, filename, rules):
         d_text = ''
         while True:
             d_soup = BeautifulSoup(d.text, features="html.parser")
-            for t in d_soup.select(rules["content"]):
+            for t in d_soup.select(rule["content"]):
                d_text = d_text + '\t' + t.text + '\n'
-            if d_soup.select(rules["is_next"])[-1].text.find('下一页') < 0:
+            if d_soup.select(rule["is_next"])[-1].text.find('下一页') < 0:
                 break
             d = req(base_url + d_soup.select('#next_url')[-1].get('href'))
 
         try:
-            with open(filename, 'a', encoding=r.encoding) as f:
+            with open(get_download_path() + filename, 'a', encoding=r.encoding) as f:
                 f.write(r_title + '\n')
                 print(r_title)
                 f.write(d_text.replace('     ', '\t') + '\n\n')
@@ -94,18 +102,39 @@ def prefix_title(title_str):
         return title_str + '\n'
 
 
+def find_rules(book_toc_url: str):
+    # 获取base_url
+    parsed_url = urlparse(book_toc_url)
+    base_url = parsed_url.scheme + "://" + parsed_url.netloc
+
+    # 遍历已有规则，查看是否有匹配数据
+    rules = json.loads(os.getenv("RULES"))
+    for rule in rules:
+        if rule['url'] == base_url:
+            return rule['url'], book_toc_url, rule['rule']
+    raise ValueError("找不到该网址的规则: " + book_toc_url)
+
+
+def get_download_path():
+    download_path = os.getenv("DOWNLOAD_PATH")
+    if download_path is None:
+        # 设置默认路径
+        download_path = os.getenv("HOME") + '/Downloads'
+    # 若配置路基采用了相对路径，转换成绝对路径
+    elif download_path.startswith('~'):
+        download_path = download_path.replace('~', os.getenv("HOME"))
+    if os.path.isdir(download_path):
+        return download_path + '/'
+    else:
+        raise ValueError('DOWNLOAD_PATH配置错误，请检查({})'.format(download_path))
+
+
+def check_rule(rule):
+    # name、toc、content 必须要有
+    if rule['name'] is None or rule['toc'] is None or rule['content'] is None:
+        raise ValueError('规则错误 {}'.format(rule))
+
+
 if __name__ == '__main__':
-
-    rule = {
-        "toc": ".container.border3-2.mt8.mb20>.info-chapters.flex.flex-wrap>a",
-        "content": "#article>p",
-        "is_next": "#next_url"
-    }
-    spider_books("https://www.ibiqiuge.com", 'https://www.ibiqiuge.com/99520/', "星门.txt", rule)
-
-    # title = '001 优秀市民马修和天杀的死灵法师'
-    # print(prefix_title(title))
-    # title2 = '第001章 优秀市民马修和天杀的死灵法师'
-    # print(prefix_title(title2))
-    # title3 = '第001章优秀市民马修和天杀的死灵法师'
-    # print(prefix_title(title3))
+    base_url, toc_url, rule = find_rules('https://www.ibiqiuge.com/96478/')
+    spider_books(base_url, toc_url, rule)
