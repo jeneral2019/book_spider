@@ -135,6 +135,29 @@ def check_rule(rule):
         raise ValueError('规则错误 {}'.format(rule))
 
 
+def get_search_rule(rule):
+    return rule['search']
+
+
+def search(search_text):
+    results = []
+    rules = json.loads(os.getenv("RULES"))
+    for r1 in rules:
+        rule = r1['rule']
+        if rule['search'] is None or rule['search']['search_url'] is None or rule['search']['search_request'] is None:
+            continue
+        data = {k: search_text if v == '#text' else v for k, v in rule['search']['search_request'].items()}
+        r = requests.post(rule['search']['search_url'], data=data)
+        r.encoding = r.apparent_encoding
+        soup = BeautifulSoup(r.text, features="html.parser")
+        book_names = soup.select(rule['search']["book_name"])
+        book_urls = soup.select(rule['search']["book_url"])
+        results.append({r1['url'] + k.get('href'): v.text for k, v in zip(book_urls, book_names)})
+    return results
+
+
 if __name__ == '__main__':
-    base_url, toc_url, rule = find_rules('https://www.ibiqiuge.com/96478/')
-    spider_books(base_url, toc_url, rule)
+    # base_url, toc_url, rule = find_rules('https://www.ibiqiuge.com/96478/')
+    # spider_books(base_url, toc_url, rule)
+    # print(get_search_rule(rule))
+    print(search('万相'))
