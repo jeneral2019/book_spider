@@ -157,7 +157,7 @@ def search(search_text):
 
 
 if __name__ == '__main__':
-    # base_url, toc_url, rule = find_rules('https://www.ibiqiuge.com/96478/')
-    # spider_books(base_url, toc_url, rule)
+    base_url, toc_url, rule = find_rules('https://www.1688by.com/book/177307')
+    spider_books(base_url, toc_url, rule)
     # print(get_search_rule(rule))
-    print(search('万相'))
+    # print(search('万相'))
