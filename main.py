@@ -38,21 +38,23 @@ rule = {
 '''
 
 
-def req(url):
+def req(url, proxies=None):
+    if proxies is None:
+        proxies = {'http': None, 'https': None}
     e = 0
     while e < 100:
         try:
-            r = requests.get(url, timeout=(6, 30))
+            r = requests.get(url, timeout=(6, 30),proxies=proxies,headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'})
             if r.status_code == 200:
                 break
             elif r.status_code == 404:
                 raise ValueError("网址错误: " + url)
             else:
                 e = e + 1
-                print("request error:" + str(r.status_code))
+                print(f"[{e}]: request error:" + str(r.status_code))
         except Exception as Ex:
             e = e + 1
-            print(Ex)
+            print(f"[{e}]: request error: {Ex}")
             time.sleep(1)
     return r
 
@@ -60,15 +62,32 @@ def req(url):
 def spider_books(base_url, toc_url, rule):
     # 规则检查
     check_rule(rule)
-
-    r = req(toc_url)
+    if 'proxies' in rule:
+        proxies = rule['proxies']
+    else:
+        proxies = None
+    r = req(toc_url,proxies)
     r.encoding = r.apparent_encoding
     soup = BeautifulSoup(r.text, features="html.parser")
     filename = soup.select(rule["name"])[0].text + '.txt'
-    titles = soup.select(rule["toc"])
+    if 'toc_is_next' in rule:
+        titles = []
+        while True:
+            titles.extend(soup.select(rule["toc"]))
+            if soup.select(rule["toc_is_next"])[-1].text != '下一页':
+                break
+            soup = BeautifulSoup(req(base_url + soup.select(rule["toc_is_next"])[-1].get('href'), proxies).text, features="html.parser")
+
+    else:
+        titles = soup.select(rule["toc"])
     for title in titles:
         r_title = prefix_title(title.text)
-        d = req(base_url + title.get('href'))
+        if 'href' in rule:
+            d = req(base_url + title.get('href'))
+        elif title.get('onclick') is None:
+                continue
+        else:
+            d = req(base_url + title.get('onclick').split('=')[1].replace('\'',''), proxies)
         d.encoding = d.apparent_encoding
         d_text = ''
         while True:
@@ -77,7 +96,7 @@ def spider_books(base_url, toc_url, rule):
                d_text = d_text + '\t' + t.text + '\n'
             if d_soup.select(rule["is_next"])[-1].text.find('下一页') < 0:
                 break
-            d = req(base_url + d_soup.select('#next_url')[-1].get('href'))
+            d = req(base_url + d_soup.select('#next_url')[-1].get('href'), proxies)
 
         try:
             with open(get_download_path() + filename, 'a', encoding=r.encoding) as f:
@@ -157,7 +176,7 @@ def search(search_text):
 
 
 if __name__ == '__main__':
-    base_url, toc_url, rule = find_rules('https://www.1688by.com/book/177307')
+    base_url, toc_url, rule = find_rules('https://www.fd80s.com/indexlist/450/450192/1.html')
     spider_books(base_url, toc_url, rule)
     # print(get_search_rule(rule))
     # print(search('万相'))
