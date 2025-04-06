@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 import bisect
 from ebooklib import epub
 import glob
+import aiohttp
+import asyncio
 
 load_dotenv()
 default_user_agent = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -144,20 +146,50 @@ def compare_titles(title1, title2, exact_level=0):
                  or title_no_special(title2) in title_no_special(title1))
 
 
-def spider_content(base_url, content_url, rule):
+async def spider_content_async(base_url, content_url, rule):
     if content_url is None:
-        raise 'content_url is none'
-    d = req(base_url + content_url, rule['proxies'] if 'proxies' in rule else {'http': None, 'https': None})
-    d.encoding = d.apparent_encoding
-    d_text = ''
-    while True:
-        d_soup = BeautifulSoup(d.text, features="html.parser")
-        for t in d_soup.select(rule["content"]):
-            d_text += t.get_text(separator='\n').encode('utf-8', errors='ignore').decode('utf-8')
-        if 'is_next' not in rule or d_soup.select(rule["is_next"])[-1].text.find('下一页') < 0:
-            break
-        d = req(base_url + d_soup.select('#next_url')[-1].get('href'), rule['proxies'] if 'proxies' in rule else None)
-    return d_text
+        raise ValueError('content_url is none')
+
+    async with aiohttp.ClientSession() as session:
+        d_text = ''
+        current_url = base_url + content_url
+
+        while True:
+            # 重试逻辑
+            for _ in range(30):
+                try:
+                    async with session.get(
+                        current_url,
+                        proxy=rule.get('proxies', {}).get('http'),
+                        headers={'User-Agent': default_user_agent},
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as response:
+                        if response.status == 200:
+                            html = await response.text()
+                            break
+                        elif response.status == 404:
+                            raise ValueError("网址错误: " + current_url)
+                        else:
+                            print(f"[{_ + 1}]: request error: {response.status}")
+                            await asyncio.sleep(1)
+                            continue
+                except Exception as ex:
+                    print(f"[{_ + 1}]: request error: {ex}")
+                    await asyncio.sleep(1)
+                    continue
+            else:
+                raise Exception(f"重试30次后仍然失败: {current_url}")
+
+            d_soup = BeautifulSoup(html, features="html.parser")
+            for t in d_soup.select(rule["content"]):
+                d_text += t.get_text(separator='\n').encode('utf-8', errors='ignore').decode('utf-8')
+
+            if 'is_next' not in rule or d_soup.select(rule["is_next"])[-1].text.find('下一页') < 0:
+                break
+
+            current_url = base_url + d_soup.select('#next_url')[-1].get('href')
+
+        return d_text
 
 
 def spider_desc(novel_id, qi_dian_cookie=None, spider_url=None):
@@ -195,10 +227,28 @@ def spider_desc(novel_id, qi_dian_cookie=None, spider_url=None):
                     qi_dian_catalog['spider_id'] = spider_catalog['id']
                     spider_catalog['is_checked'] = True
                     break
-    for i in range(len(spider_catalog_list)):
+    spider_catalog_list_len = len(spider_catalog_list)
+    qi_dian_catalog_list_len = len(qi_dian_catalog_list)
+    for i in range(spider_catalog_list_len):
         if spider_catalog_list[i]['is_checked']:
             continue
-        for j in range(len(qi_dian_catalog_list)):
+        if i == 0:
+            if spider_catalog_list[1]['is_checked'] and 'spider_id' in qi_dian_catalog_list[1]:
+                qi_dian_catalog_list[0]['spider_url'] = spider_catalog_list[0]['href']
+                qi_dian_catalog_list[0]['spider_name'] = spider_catalog_list[0]['title']
+                qi_dian_catalog_list[0]['spider_id'] = spider_catalog_list[0]['id']
+                spider_catalog_list[0]['is_checked'] = True
+                break
+            continue
+        for j in range(qi_dian_catalog_list_len):
+            if j == qi_dian_catalog_list_len - 1:
+                if i == spider_catalog_list_len - 1 and spider_catalog_list[-2]['is_checked'] and 'spider_id' in qi_dian_catalog_list[-2]:
+                    qi_dian_catalog_list[-1]['spider_url'] = spider_catalog_list[-1]['href']
+                    qi_dian_catalog_list[-1]['spider_name'] = spider_catalog_list[-1]['title']
+                    qi_dian_catalog_list[-1]['spider_id'] = spider_catalog_list[-1]['id']
+                    spider_catalog_list[-1]['is_checked'] = True
+                    break
+                continue
             if 'spider_id' in qi_dian_catalog_list[j] and spider_catalog_list[i-1]['id'] == qi_dian_catalog_list[j]['spider_id']:
                 if 'spider_id' not in qi_dian_catalog_list[j+1]:
                     if (('spider_id' in qi_dian_catalog_list[j+2] and spider_catalog_list[i+1]['is_checked']) or
@@ -336,7 +386,7 @@ def download_image(url, save_path):
         print(f"下载失败: {e}")
 
 
-def spider_book(book_id):
+async def spider_book_async(book_id, max_concurrent=100):
     book_path = get_download_path() + f'/{book_id}'
     with open(book_path + '/desc.json', 'r', encoding='utf-8') as f:
         desc_json = json.load(f)
@@ -347,21 +397,37 @@ def spider_book(book_id):
 
     if not os.path.exists(book_path + '/pic.webp') and book_pic is not None and book_pic.startswith('http'):
         download_image(book_pic, book_path + '/pic.webp')
-    index = 0
-    # TODO 异步抓取
-    for chapter in catalog_list:
-        index += 1
-        _id = chapter['index'] if 'index' in chapter else f'{index:05d}'
-        file_name = f'{_id}_{chapter["title"]}.txt'
-        if not os.path.exists(f'{book_path}/{file_name.replace("/", "／")}'):
-            if 'spider_url' in chapter and chapter['spider_url'] is not None:
-                print(f'{index}/{len(catalog_list)} {chapter["title"]} spider...')
-                content = spider_content(spider_base_url, chapter['spider_url'], spider_rule)
-                with open(f'{book_path}/{file_name.replace("/", "／")}', 'w', encoding='utf-8') as f:
-                    f.write(content)
-            else:
-                print(f'{index}/{len(catalog_list)} {chapter["title"]} skip...')
 
+    # 创建信号量来限制并发数量
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def process_chapter(chapter, index, total):
+        _id = chapter.get('index', f'{index:05d}')
+        file_name = f'{_id}_{chapter["title"]}.txt'
+        file_path = f'{book_path}/{file_name.replace("/", "／")}'
+
+        if not os.path.exists(file_path):
+            if 'spider_url' in chapter and chapter['spider_url'] is not None:
+                print(f'{index}/{total} {chapter["title"]} spider...')
+                async with semaphore:  # 使用信号量控制并发
+                    try:
+                        content = await spider_content_async(spider_base_url, chapter['spider_url'], spider_rule)
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        print(f'✅ {index}/{total} {chapter["title"]} completed')
+                    except Exception as e:
+                        print(f'❌ {index}/{total} {chapter["title"]} failed: {str(e)}')
+            else:
+                print(f'{index}/{total} {chapter["title"]} skip...')
+
+    # 创建所有任务
+    tasks = []
+    for index, chapter in enumerate(catalog_list, 1):
+        task = asyncio.create_task(process_chapter(chapter, index, len(catalog_list)))
+        tasks.append(task)
+
+    # 等待所有任务完成
+    await asyncio.gather(*tasks)
 
 
 def txt_to_epub(txt_file, epub_file, title="小说标题", author="未知作者"):
@@ -422,12 +488,3 @@ def txt_to_epub(txt_file, epub_file, title="小说标题", author="未知作者"
     epub.write_epub(epub_file, book, {})
 
     print(f"EPUB 生成成功: {epub_file}")
-
-
-if __name__ == '__main__':
-    novel_id = 1029391348
-    spider_url = 'https://www.22biqu.com/biqu4729/'
-    cookie = 'e1=%7B%22l6%22%3A%221%22%2C%22l7%22%3A%22%22%2C%22l1%22%3A2%2C%22l3%22%3A%22%22%2C%22pid%22%3A%22qd_P_xiangqing%22%2C%22eid%22%3A%22%22%7D; e2=%7B%22l6%22%3A%221%22%2C%22l7%22%3A%22%22%2C%22l1%22%3A2%2C%22l3%22%3A%22%22%2C%22pid%22%3A%22qd_P_xiangqing%22%2C%22eid%22%3A%22%22%7D; supportwebp=true; _gid=GA1.2.195804877.1743772511; supportWebp=true; traffic_search_engine=; _csrfToken=Crd2VS2PbOhILcRZX2fCQ3NwH9bIhwpVdupg4NDT; traffic_utm_referer=; newstatisticUUID=1743839211_1453183223; fu=1538968702; Hm_lvt_f00f67093ce2f38f215010b699629083=1743486831,1743772509,1743839211; HMACCOUNT=7A71F7CA3E240AF9; e1=%7B%22l6%22%3A%22%22%2C%22l7%22%3A%22%22%2C%22l1%22%3A2%2C%22l3%22%3A%22%22%2C%22pid%22%3A%22qd_p_qidian%22%2C%22eid%22%3A%22%22%7D; e2=%7B%22l6%22%3A%22%22%2C%22l7%22%3A%22%22%2C%22l1%22%3A2%2C%22l3%22%3A%22%22%2C%22pid%22%3A%22qd_p_qidian%22%2C%22eid%22%3A%22qd_H_Search%22%7D; Hm_lpvt_f00f67093ce2f38f215010b699629083=1743839655; _ga_FZMMH98S83=GS1.1.1743839211.6.1.1743839654.0.0.0; _ga=GA1.1.463861789.1743486831; _ga_PFYW0QLV3P=GS1.1.1743839211.6.1.1743839654.0.0.0; w_tsfp=ltvuV0MF2utBvS0Q7anhl0KpFTEjfT84h0wpEaR0f5thQLErU5mB0o55t8zzMHfc4sxnvd7DsZoyJTLYCJI3dwNHFJ6Ud4kYi1uRm4YhithFVBJlFM3UXgMbKupzvjZDdXhCNxS00jA8eIUd379yilkMsyN1zap3TO14fstJ019E6KDQmI5uDW3HlFWQRzaLbjcMcuqPr6g18L5a5TmJ7Vj7KQkgAbtGhEeTgXkaXHAhskXvIrxVY0ivJpynSqA='
-    write_desc(novel_id, spider_url, cookie)
-    spider_book(novel_id)
-    write_epub(novel_id)
