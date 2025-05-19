@@ -6,3 +6,5 @@ EbookLib
 aiofiles
 aiohttp
 httpx
+lxml
+cssselect

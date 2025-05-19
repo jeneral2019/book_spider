@@ -16,12 +16,14 @@ from ebooklib import epub
 import glob
 import aiohttp
 import asyncio
+from Log import Log
 
 load_dotenv()
 default_user_agent = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) '
                       'Chrome/129.0.0.0 Safari/537.36')
 
-
+log = Log('tool')
+log.info('start')
 # 请求重试
 def req(url, proxies, headers=None):
     if headers is None:
@@ -38,15 +40,15 @@ def req(url, proxies, headers=None):
                 raise ValueError("网址错误: " + url)
             else:
                 e = e + 1
-                print(f"[{e}]: request error:" + str(r.status_code))
+                print(f"[{e}]: request error: " + url + "   " + str(r.status_code))
         except Exception as Ex:
             e = e + 1
-            print(f"[{e}]: request error: {Ex}")
+            print(f"[{e}]: request error: {Ex}" + url + "   " + str(r.status_code))
             time.sleep(1)
 
 
 def find_catalog_by_qi_dian(novel_id, cookie=None):
-    novel_url = f"https://www.qidian.com/book/{novel_id}/"
+    novel_url = f"https://book.qidian.com/info/{novel_id}/"
     header = {
         'Cookie': cookie,
         'User-Agent': default_user_agent,
@@ -54,10 +56,12 @@ def find_catalog_by_qi_dian(novel_id, cookie=None):
     response = req(novel_url, proxies=None, headers=header)
     soup = BeautifulSoup(response.text, "html.parser")
     book_name = soup.find(id='bookName').text
-    author = soup.find(class_='author').text.split("作者:")[1].strip()
+    author = soup.find(class_='writer').text.strip()
     pic_url = 'http:' + soup.find(id='bookImg').img['src']
+    if not pic_url.endswith('.webp'):
+        pic_url = f'{pic_url.strip()}.webp'
     all_catalog = []
-    for a in soup.select("#allCatalog li a"):
+    for a in soup.select("#j-catalogWrap .book_name a"):
         cid = a['data-cid'].rstrip("/").rsplit("/", 1)[-1]
         chapter_link = {'id': cid, 'title': a.text.strip(), 'href': a["href"]}
         all_catalog.append(chapter_link)
@@ -75,13 +79,17 @@ def find_catalog_by_spider(base_url, toc_url, rule):
     r = req(toc_url, proxies)
     r.encoding = r.apparent_encoding
     soup = BeautifulSoup(r.text, features="html.parser")
+    book_name = soup.select(rule["name"])[0].text.strip()
+    author = soup.select(rule["author"])[0].text.strip().rsplit('：', 1)[-1]
+    pic_url = soup.select(rule["pic_url"])[0]['src']
     if 'toc_is_next' in rule:
         titles = []
         while True:
             titles.extend(soup.select(rule["toc"]))
             if soup.select(rule["toc_is_next"])[-1].text != '下一页':
                 break
-            soup = BeautifulSoup(req(base_url + soup.select(rule["toc_is_next"])[-1].get('href'), proxies).text, features="html.parser")
+            soup = BeautifulSoup(req(base_url + soup.select(rule["toc_is_next"])[-1].get('href'), proxies).text,
+                                 features="html.parser")
     else:
         titles = soup.select(rule["toc"])
     catalog = []
@@ -92,7 +100,7 @@ def find_catalog_by_spider(base_url, toc_url, rule):
         chapter_link = {'id': cid, 'title': name, 'href': href, 'is_checked': False}
         if not any(item['id'] == chapter_link['id'] for item in catalog):
             bisect.insort(catalog, chapter_link, key=lambda x: x['id'])
-    return catalog
+    return book_name, author, pic_url, catalog
 
 
 def find_rules(book_toc_url: str):
@@ -124,11 +132,17 @@ def get_download_path():
 
 def compare_titles(title1, title2, exact_level=0):
     # 去除开头的 "第X章"
-    def title_no_chapter(title): return re.sub(r'^第[零一二两三四五六七八九十百千万\d]+章\s*', '', title)
+    def title_no_chapter(title):
+        return re.sub(r'^第[零一二两三四五六七八九十百千万\d]+章\s*', '', title)
+
     # 去除括号内内容
-    def title_no_parentheses(title): return re.sub(r'[（(].*?[）)]', '', title_no_chapter(title))
+    def title_no_parentheses(title):
+        return re.sub(r'[（(].*?[）)]', '', title_no_chapter(title))
+
     # 去除特殊符号
-    def title_no_special(title): return re.sub(r'[^\w\u4e00-\u9fa5]+', '', title_no_parentheses(title))
+    def title_no_special(title):
+        return re.sub(r'[^\w\u4e00-\u9fa5]+', '', title_no_parentheses(title))
+
     if exact_level == 0:
         # 直接对比标题
         return title1 == title2
@@ -143,10 +157,11 @@ def compare_titles(title1, title2, exact_level=0):
         return title_no_special(title1) == title_no_special(title2)
     else:
         return (title_no_special(title1) in title_no_special(title2)
-                 or title_no_special(title2) in title_no_special(title1))
+                or title_no_special(title2) in title_no_special(title1))
 
 
 async def spider_content_async(base_url, content_url, rule):
+    log.info(f"spider_content_async({base_url}, {content_url})")
     if content_url is None:
         raise ValueError('content_url is none')
 
@@ -159,10 +174,10 @@ async def spider_content_async(base_url, content_url, rule):
             for _ in range(30):
                 try:
                     async with session.get(
-                        current_url,
-                        proxy=rule.get('proxies', {}).get('http'),
-                        headers={'User-Agent': default_user_agent},
-                        timeout=aiohttp.ClientTimeout(total=30)
+                            current_url,
+                            proxy=rule.get('proxies', {}).get('http'),
+                            headers={'User-Agent': default_user_agent},
+                            timeout=aiohttp.ClientTimeout(total=30)
                     ) as response:
                         if response.status == 200:
                             html = await response.text()
@@ -175,24 +190,69 @@ async def spider_content_async(base_url, content_url, rule):
                             continue
                 except Exception as ex:
                     print(f"[{_ + 1}]: request error: {ex}")
+                    log.info(f"[{_ + 1}]: request error: {ex}")
                     await asyncio.sleep(1)
                     continue
             else:
                 raise Exception(f"重试30次后仍然失败: {current_url}")
 
             d_soup = BeautifulSoup(html, features="html.parser")
-            for t in d_soup.select(rule["content"]):
-                d_text += t.get_text(separator='\n').encode('utf-8', errors='ignore').decode('utf-8')
 
-            if 'is_next' not in rule or d_soup.select(rule["is_next"])[-1].text.find('下一页') < 0:
+            # 获取正文内容
+            content_elements = d_soup.select(rule["content"])
+            if not content_elements:
+                log.warning(f"未找到正文内容: {current_url}")
                 break
 
-            current_url = base_url + d_soup.select('#next_url')[-1].get('href')
+            for t in content_elements:
+                d_text += t.get_text(separator='\n').encode('utf-8', errors='ignore').decode('utf-8')
+
+            # 检查是否有下一页 - 更安全的处理方式
+            if 'is_next' not in rule:
+                break
+
+            next_page_elements = d_soup.select(rule["is_next"])
+            if not next_page_elements:
+                log.error(f"找不到下一页元素，选择器: {rule['is_next']}, URL: {current_url}")
+                break
+
+            next_page_text = next_page_elements[-1].text
+            if '下一页' not in next_page_text:
+                break
+
+            next_page_url = next_page_elements[-1].get('href')
+            if not next_page_url:
+                log.error(f"找到下一页元素但没有href属性，URL: {current_url}")
+                break
+
+            current_url = base_url + next_page_url  # 统一使用同一个选择器获取的URL
 
         return d_text
 
 
-def spider_desc(novel_id, qi_dian_cookie=None, spider_url=None):
+def spider_content(base_url, content_url, rule):
+    if content_url is None:
+        raise ValueError('content_url is none')
+
+    d_text = ''
+    current_url = base_url + content_url
+    while True:
+        response = req(current_url, rule.get('proxies', {}).get('http'), {'User-Agent': default_user_agent})
+        response.encoding = response.apparent_encoding
+        d_soup = BeautifulSoup(response.text, features="html.parser", from_encoding=response.encoding, exclude_encodings='utf-8')
+        for t in d_soup.select(rule["content"]):
+            d_text += t.get_text(separator='\n').encode('utf-8', errors='ignore').decode('utf-8')
+
+        if 'is_next' not in rule or d_soup.select(rule["is_next"])[-1].text.find('下一页') < 0:
+            break
+
+        current_url = base_url + d_soup.select(rule["is_next"])[-1].get('href')
+
+    return d_text
+
+
+
+def spider_desc(novel_id=None, qi_dian_cookie=None, spider_url=None):
     """
     小说详情
     :param novel_id: 起点novel_id
@@ -206,65 +266,81 @@ def spider_desc(novel_id, qi_dian_cookie=None, spider_url=None):
         'catalog_list': 章节列表,
     }
     """
-    # 爬起点目录
-    book_name, author, pic_url, qi_dian_catalog_list = find_catalog_by_qi_dian(novel_id, cookie=qi_dian_cookie)
+    _catalog_list = []
+    if qi_dian_cookie is not None:
+        # 爬起点目录
+        book_name, author, pic_url, qi_dian_catalog_list = find_catalog_by_qi_dian(novel_id, cookie=qi_dian_cookie)
+        # 爬对应网站目录
+        spider_base_url, spider_rule = find_rules(spider_url)
+        spider_book_name, spider_author, spider_pic_url, spider_catalog_list = find_catalog_by_spider(spider_base_url, spider_url, spider_rule)
 
-    # 爬对应网站目录
-    spider_base_url, spider_rule = find_rules(spider_url)
-    spider_catalog_list = find_catalog_by_spider(spider_base_url, spider_url, spider_rule)
-
-    index = 0
-    for qi_dian_catalog in qi_dian_catalog_list:
-        index += 1
-        qi_dian_catalog['index'] = f'{index:05d}'
-    # 目录比对
-    for level in range(5):
-        for qi_dian_catalog in [x for x in qi_dian_catalog_list if 'spider_url' not in x]:
-            for spider_catalog in [x for x in spider_catalog_list if not x['is_checked']]:
-                if compare_titles(spider_catalog['title'], qi_dian_catalog['title'], level):
-                    qi_dian_catalog['spider_url'] = spider_catalog['href']
-                    qi_dian_catalog['spider_name'] = spider_catalog['title']
-                    qi_dian_catalog['spider_id'] = spider_catalog['id']
-                    spider_catalog['is_checked'] = True
-                    break
-    spider_catalog_list_len = len(spider_catalog_list)
-    qi_dian_catalog_list_len = len(qi_dian_catalog_list)
-    for i in range(spider_catalog_list_len):
-        if spider_catalog_list[i]['is_checked']:
-            continue
-        if i == 0:
-            if spider_catalog_list[1]['is_checked'] and 'spider_id' in qi_dian_catalog_list[1]:
-                qi_dian_catalog_list[0]['spider_url'] = spider_catalog_list[0]['href']
-                qi_dian_catalog_list[0]['spider_name'] = spider_catalog_list[0]['title']
-                qi_dian_catalog_list[0]['spider_id'] = spider_catalog_list[0]['id']
-                spider_catalog_list[0]['is_checked'] = True
-                break
-            continue
-        for j in range(qi_dian_catalog_list_len):
-            if j == qi_dian_catalog_list_len - 1:
-                if i == spider_catalog_list_len - 1 and spider_catalog_list[-2]['is_checked'] and 'spider_id' in qi_dian_catalog_list[-2]:
-                    qi_dian_catalog_list[-1]['spider_url'] = spider_catalog_list[-1]['href']
-                    qi_dian_catalog_list[-1]['spider_name'] = spider_catalog_list[-1]['title']
-                    qi_dian_catalog_list[-1]['spider_id'] = spider_catalog_list[-1]['id']
-                    spider_catalog_list[-1]['is_checked'] = True
+        index = 0
+        for qi_dian_catalog in qi_dian_catalog_list:
+            index += 1
+            qi_dian_catalog['index'] = f'{index:05d}'
+        # 目录比对
+        for level in range(5):
+            for qi_dian_catalog in [x for x in qi_dian_catalog_list if 'spider_url' not in x]:
+                for spider_catalog in [x for x in spider_catalog_list if not x['is_checked']]:
+                    if compare_titles(spider_catalog['title'], qi_dian_catalog['title'], level):
+                        qi_dian_catalog['spider_url'] = spider_catalog['href']
+                        qi_dian_catalog['spider_name'] = spider_catalog['title']
+                        qi_dian_catalog['spider_id'] = spider_catalog['id']
+                        spider_catalog['is_checked'] = True
+                        break
+        spider_catalog_list_len = len(spider_catalog_list)
+        qi_dian_catalog_list_len = len(qi_dian_catalog_list)
+        for i in range(spider_catalog_list_len):
+            if spider_catalog_list[i]['is_checked']:
+                continue
+            if i == 0:
+                if spider_catalog_list[1]['is_checked'] and 'spider_id' in qi_dian_catalog_list[1]:
+                    qi_dian_catalog_list[0]['spider_url'] = spider_catalog_list[0]['href']
+                    qi_dian_catalog_list[0]['spider_name'] = spider_catalog_list[0]['title']
+                    qi_dian_catalog_list[0]['spider_id'] = spider_catalog_list[0]['id']
+                    spider_catalog_list[0]['is_checked'] = True
                     break
                 continue
-            if 'spider_id' in qi_dian_catalog_list[j] and spider_catalog_list[i-1]['id'] == qi_dian_catalog_list[j]['spider_id']:
-                if 'spider_id' not in qi_dian_catalog_list[j+1]:
-                    if (('spider_id' in qi_dian_catalog_list[j+2] and spider_catalog_list[i+1]['is_checked']) or
-                            ('spider_id' not in qi_dian_catalog_list[j+2] and not spider_catalog_list[i+1]['is_checked'])):
-                        qi_dian_catalog_list[j+1]['spider_url'] = spider_catalog_list[i]['href']
-                        qi_dian_catalog_list[j+1]['spider_name'] = spider_catalog_list[i]['title']
-                        qi_dian_catalog_list[j+1]['spider_id'] = spider_catalog_list[i]['id']
-                        spider_catalog_list[i]['is_checked'] = True
+            for j in range(qi_dian_catalog_list_len):
+                if j == qi_dian_catalog_list_len - 1:
+                    if i == spider_catalog_list_len - 1 and spider_catalog_list[-2]['is_checked'] and 'spider_id' in \
+                            qi_dian_catalog_list[-2]:
+                        qi_dian_catalog_list[-1]['spider_url'] = spider_catalog_list[-1]['href']
+                        qi_dian_catalog_list[-1]['spider_name'] = spider_catalog_list[-1]['title']
+                        qi_dian_catalog_list[-1]['spider_id'] = spider_catalog_list[-1]['id']
+                        spider_catalog_list[-1]['is_checked'] = True
                         break
+                    continue
+                if 'spider_id' in qi_dian_catalog_list[j] and spider_catalog_list[i - 1]['id'] == qi_dian_catalog_list[j][
+                    'spider_id']:
+                    if 'spider_id' not in qi_dian_catalog_list[j + 1]:
+                        if (('spider_id' in qi_dian_catalog_list[j + 2] and spider_catalog_list[i + 1]['is_checked']) or
+                                ('spider_id' not in qi_dian_catalog_list[j + 2] and not spider_catalog_list[i + 1][
+                                    'is_checked'])):
+                            qi_dian_catalog_list[j + 1]['spider_url'] = spider_catalog_list[i]['href']
+                            qi_dian_catalog_list[j + 1]['spider_name'] = spider_catalog_list[i]['title']
+                            qi_dian_catalog_list[j + 1]['spider_id'] = spider_catalog_list[i]['id']
+                            spider_catalog_list[i]['is_checked'] = True
+                            break
+        _catalog_list = qi_dian_catalog_list
+    else:
+        spider_base_url, spider_rule = find_rules(spider_url)
+        book_name, author, pic_url, _catalog_list = find_catalog_by_spider(spider_base_url, spider_url, spider_rule)
+
+        index = 0
+        for catalog in _catalog_list:
+            index += 1
+            catalog['index'] = f'{index:05d}'
+            catalog["spider_url"] = catalog.pop("href")
+            catalog['is_checked'] = True
+
     return {
         'book_name': book_name,
         'author': author,
         'book_pic': pic_url,
         'spider_rule': spider_rule,
         'spider_base_url': spider_base_url,
-        'catalog_list': qi_dian_catalog_list,
+        'catalog_list': _catalog_list
     }
 
 
@@ -283,6 +359,7 @@ def write_desc(novel_id, spider_url=None, qi_dian_cookie=None):
 
 
 def write_epub(book_id):
+    #TODO 目录获取
     book_path = get_download_path() + f'/{book_id}'
     desc_path = os.path.join(book_path, 'desc.json')
 
@@ -292,8 +369,8 @@ def write_epub(book_id):
     with open(desc_path, 'r', encoding='utf-8') as f:
         desc_json = json.load(f)
 
-    book_name = desc_json['book_name']
-    author = desc_json['author']
+    book_name = desc_json.get('book_name', f'book_{book_id}')
+    author = desc_json.get('author', '未知作者')
 
     book = epub.EpubBook()
     book.set_identifier(f'id{book_id}')
@@ -322,7 +399,8 @@ def write_epub(book_id):
             margin: 0.3em 0 0.3em 0em;
         }
     '''
-    style = epub.EpubItem(uid="style1", file_name="styles.css", media_type="text/css", content=css_content.encode('utf-8'))
+    style = epub.EpubItem(uid="style1", file_name="styles.css", media_type="text/css",
+                          content=css_content.encode('utf-8'))
     book.add_item(style)
 
     # 添加封面
@@ -354,7 +432,8 @@ def write_epub(book_id):
             chapters.append(chapter)
 
     # 设置目录
-    book.toc = [epub.Section(book_name, chapters)]
+    # book.toc = [epub.Section(book_name, chapters)]
+    book.toc = chapters
 
     # 添加 EPUB 目录和导航
     book.add_item(epub.EpubNcx())
@@ -414,11 +493,11 @@ async def spider_book_async(book_id, max_concurrent=100):
                         content = await spider_content_async(spider_base_url, chapter['spider_url'], spider_rule)
                         with open(file_path, 'w', encoding='utf-8') as f:
                             f.write(content)
-                        print(f'✅ {index}/{total} {chapter["title"]} completed')
+                        print(f'✅ {index}/{total} completed {chapter["title"]}')
                     except Exception as e:
-                        print(f'❌ {index}/{total} {chapter["title"]} failed: {str(e)}')
+                        print(f'❌ {index}/{total} failed {chapter["title"]}: {str(e)}')
             else:
-                print(f'{index}/{total} {chapter["title"]} skip...')
+                print(f'{index}/{total} skip {chapter["title"]} ...')
 
     # 创建所有任务
     tasks = []
@@ -428,6 +507,39 @@ async def spider_book_async(book_id, max_concurrent=100):
 
     # 等待所有任务完成
     await asyncio.gather(*tasks)
+
+def spider_book(book_id):
+    book_path = get_download_path() + f'/{book_id}'
+    with open(book_path + '/desc.json', 'r', encoding='utf-8') as f:
+        desc_json = json.load(f)
+    book_pic = desc_json['book_pic']
+    spider_rule = desc_json['spider_rule']
+    spider_base_url = desc_json['spider_base_url']
+    catalog_list = desc_json['catalog_list']
+
+    if not os.path.exists(book_path + '/pic.webp') and book_pic is not None:
+        if not book_pic.startswith('http'):
+            book_pic = spider_base_url + book_pic
+        download_image(book_pic, book_path + '/pic.webp')
+
+    total = len(catalog_list)
+    for chapter in catalog_list:
+        index = chapter['index']
+        file_name = f'{index}_{chapter["title"]}.txt'
+        file_path = f'{book_path}/{file_name.replace("/", "／")}'
+
+        if not os.path.exists(file_path):
+            if 'spider_url' in chapter and chapter['spider_url'] is not None:
+                print(f'{index}/{total} {chapter["title"]} spider...')
+                try:
+                    content = spider_content(spider_base_url, chapter['spider_url'], spider_rule)
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    print(f'✅ {index}/{total} completed {chapter["title"]}')
+                except Exception as e:
+                    print(f'❌ {index}/{total} failed {chapter["title"]}: {str(e)}')
+            else:
+                print(f'{index}/{total} skip {chapter["title"]} ...')
 
 
 def txt_to_epub(txt_file, epub_file, title="小说标题", author="未知作者"):
