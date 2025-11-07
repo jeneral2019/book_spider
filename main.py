@@ -28,8 +28,12 @@ if __name__ == '__main__':
     # asyncio.run(spider_book_async(novel_id))
     # write_epub(novel_id)
 
-    novel_id = 20216
-    spider_url = 'https://www.wxscs.com/book/20216/'
+    novel_id = 52403
+    # spider_url = 'https://www.22biqu.com/biqu85100/'
+    # spider_url = 'https://www.22biqu.com/biqu74142/'
+    # spider_url = 'https://www.22biqu.com/biqu67040/'
+    # spider_url = 'https://www.22biqu.com/biqu84517/'
+    spider_url = 'https://www.biquges123.com/52403'
     # write_desc(novel_id, spider_url, cookie)
     write_desc(novel_id, spider_url, None)
     asyncio.run(spider_book_async(novel_id))

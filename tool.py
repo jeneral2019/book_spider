@@ -33,7 +33,7 @@ def req(url, proxies, headers=None):
     e = 0
     while e < 100:
         try:
-            r = requests.get(url, timeout=(6, 30), proxies=proxies, headers=headers)
+            r = requests.get(url, timeout=(6, 60), proxies=proxies, headers=headers)
             if r.status_code == 200:
                 return r
             elif r.status_code == 404:
@@ -43,7 +43,7 @@ def req(url, proxies, headers=None):
                 print(f"[{e}]: request error: " + url + "   " + str(r.status_code))
         except Exception as Ex:
             e = e + 1
-            print(f"[{e}]: request error: {Ex}" + url + "   " + str(r.status_code))
+            print(f"[{e}]: request error: {Ex}" + url + "   ")
             time.sleep(1)
 
 
@@ -80,7 +80,7 @@ def find_catalog_by_spider(base_url, toc_url, rule):
     r.encoding = r.apparent_encoding
     soup = BeautifulSoup(r.text, features="html.parser")
     book_name = soup.select(rule["name"])[0].text.strip()
-    author = soup.select(rule["author"])[0].text.strip().rsplit('：', 1)[-1]
+    author = soup.select(rule["author"])[-1].text.strip().rsplit('：', 1)[-1]
     pic_url = soup.select(rule["pic_url"])[0]['src']
     if 'toc_is_next' in rule:
         titles = []
@@ -94,7 +94,7 @@ def find_catalog_by_spider(base_url, toc_url, rule):
         titles = soup.select(rule["toc"])
     catalog = []
     for title in titles:
-        cid = title["href"].rsplit('/', 1)[-1].rsplit('.', 1)[0]
+        cid = title["href"].rsplit('/', 1)[-1].rsplit('.', 1)[0].zfill(8)
         name = title.text.strip()
         href = title["href"].strip()
         chapter_link = {'id': cid, 'title': name, 'href': href, 'is_checked': False}
@@ -205,7 +205,7 @@ async def spider_content_async(base_url, content_url, rule):
                 break
 
             for t in content_elements:
-                d_text += t.get_text(separator='\n').encode('utf-8', errors='ignore').decode('utf-8')
+                d_text += t.get_text(separator='\n').encode('utf-8', errors='ignore').decode('utf-8') + '\n'
 
             # 检查是否有下一页 - 更安全的处理方式
             if 'is_next' not in rule:
@@ -425,9 +425,13 @@ def write_epub(book_id):
             chapter_file = f'{chapter_id}_{title}.xhtml'
 
             chapter = epub.EpubHtml(title=title, file_name=chapter_file, lang='zh')
-            chapter.content = f'<h2>{title}</h2><p>{content.replace(" ", "</p><p>")}</p>'
-            chapter.add_link(href='styles.css', rel='stylesheet', type='text/css')
+            # chapter.content = f'<h2>{title}</h2><p>{content.replace(" ", "</p><p>")}</p>'
+            # 按行生成 <p> 标签
+            lines = [line.strip() for line in content.split('\n') if line.strip()]  # 去掉空行
+            paragraphs = ''.join(f'<p>{line}</p>' for line in lines)
 
+            chapter.content = f'<h2>{title}</h2>{paragraphs}'
+            chapter.add_link(href='styles.css', rel='stylesheet', type='text/css')
             book.add_item(chapter)
             chapters.append(chapter)
 
